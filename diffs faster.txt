@@ -1,7 +1,7 @@
 param(
-    [string]$sinceDate = "2025-01-01",
-    [string]$untilDate = "2025-12-05",
-    [string]$outputFile = "diffs.md",
+    [string]$sinceDate = "2024-01-01",
+    [string]$untilDate = "2025-02-22",
+    [string]$outputFile = $null, 
     [int]$diffContextLines = 0,
     [switch]$ignoreWhitespace = $true, 
     [switch]$wordDiff = $false,         
@@ -10,33 +10,18 @@ param(
 )
 
 $excludePatterns = @(
-    # --- Зависимости и лок-файлы ---
     ':(exclude)package-lock.json', ':(exclude)yarn.lock', ':(exclude)pnpm-lock.yaml',
     ':(exclude)node_modules/*', ':(exclude)vendor/*', 
-
-    # --- IDE и системные файлы ---
     ':(exclude).vscode/*', ':(exclude).idea/*', ':(exclude).editorconfig',
     ':(exclude).gitignore', ':(exclude).gitlab-ci.yml', ':(exclude).npmrc',
-
-    # --- Сборка и типы ---
     ':(exclude)dist/*', ':(exclude)build/*', ':(exclude).output/*', ':(exclude).nuxt/*',
     ':(exclude)*.min.js', ':(exclude)*.min.css', ':(exclude)*.d.ts', 
     ':(exclude)auto-imports.d.ts', ':(exclude)components.d.ts',
-
-    # --- Storybook (истории и конфиги) ---
     ':(exclude)*.stories.ts', ':(exclude).storybook/*',
-
-    # --- Иконки и Ассеты (самое важное для экономии места) ---
-    # Исключаем всю папку с Vue-компонентами иконок
     ':(exclude)packages/components/src/components/icons/*', 
-    # На всякий случай по расширениям
     ':(exclude)*.svg', ':(exclude)*.png', ':(exclude)*.jpg', ':(exclude)*.ico',
     ':(exclude)*.json', # Убирает lottie, tsconfig и package.json (если package.json нужен, убери это)
-
-    # --- Тесты ---
     ':(exclude)test/*', ':(exclude)*.test.ts', ':(exclude)*.spec.ts',
-
-    # --- Playground (обычно там нет важной логики, только примеры) ---
     ':(exclude)packages/playground/*'
 )
 
@@ -46,27 +31,39 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+if (-not $outputFile) {
+    $repoName = (Get-Item (git rev-parse --show-toplevel)).Name
+    $branchName = (git rev-parse --abbrev-ref HEAD).Trim()
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $outputFile = "${repoName}_${sinceDate}_to_${untilDate}.md"
+    # $outputFile = "${repoName}_${branchName}_${sinceDate}_to_${untilDate}.md"
+    # $outputFile = "${repoName}_${branchName}_${sinceDate}_to_${untilDate}_${timestamp}.md"
+    Write-Host "Имя выходного файла не указано, сгенерировано автоматически: $outputFile"
+}
 
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $absoluteOutputFile = Join-Path -Path (Get-Location) -ChildPath $outputFile
 $writer = New-Object System.IO.StreamWriter($absoluteOutputFile, $false, [System.Text.Encoding]::UTF8)
-
 $writer.WriteLine("# Ретроспективное код-ревью (оптимизировано для LLM)`n")
 $writer.WriteLine("Период анализа: с $($sinceDate) по $($untilDate)`n")
 
-Write-Host "Начинаю сбор информации о коммитах (режим УЛЬТРА-оптимизации для LLM)..."
+Write-Host "Начинаю сбор информации..."
 
 $commitBodyFormat = if ($firstLineOnly) { "%s" } else { "%s%n%b" }
 $commitFormat = "`n## Коммит: %h | Автор: %an | Дата: %as`n**Сообщение:**`n``````text`n$($commitBodyFormat)`n``````n"
 
 $allCommitHashes = git log --all --since=$sinceDate --until=$untilDate --reverse --pretty=format:"%H"
+if (-not $allCommitHashes) {
+    Write-Warning "Коммитов за указанный период не найдено."
+    $writer.Close(); exit
+}
 $uniqueCommitHashes = $allCommitHashes | Get-Unique
 $totalCommits = $uniqueCommitHashes.Length
 $processedCount = 0
 
 foreach ($hash in $uniqueCommitHashes) {
     $processedCount++
-    Write-Progress -Activity "Анализ коммитов" -Status "Обработка коммита $processedCount из $totalCommits ($hash)" -PercentComplete (($processedCount / $totalCommits) * 100)
+    Write-Progress -Activity "Анализ коммитов" -Status "Обработка $processedCount / $totalCommits" -PercentComplete (($processedCount / $totalCommits) * 100)
 
     $commitInfo = git show -s --pretty=format:$commitFormat $hash | Out-String
     
@@ -78,66 +75,39 @@ foreach ($hash in $uniqueCommitHashes) {
         $gitShowArgs = @("show", $hash, "--pretty=format:''", "-U$($diffContextLines)")
         if ($ignoreWhitespace) { $gitShowArgs += "--ignore-all-space", "--ignore-blank-lines" }
         if ($wordDiff) { $gitShowArgs += "--word-diff=plain" }
-        
         $gitShowArgs += @("--") + $excludePatterns
         
         $rawDiff = & git @gitShowArgs | Out-String
 
-        # НОВЫЙ БЛОК: Очистка от комментариев
         if ($ignoreComments) {
-            # Этот regex удаляет строки, которые являются добавлением (+) или удалением (-)
-            # и состоят ТОЛЬКО из пробелов, за которыми следует комментарий.
-            # 1. `\/\/.*`          - для // комментариев
-            # 2. `\/\*.*\*\/`      - для /* ... */ на одной строке
-            # 3. `\/\*.*`          - для начала блочного комментария /*
-            # 4. `\*\s.*`          - для строк внутри блочного комментария, начинающихся с *
-            # 5. `.*\*\/`          - для конца блочного комментария */
             $commentPattern = '(?m)^[+-]\s*(\/\/.*|\/\*.*\*\/|\/\*.*|\*\s.*|.*\*\/)\r?\n'
             $rawDiff = $rawDiff -replace $commentPattern, ''
         }
 
-        # Очищаем вывод дифф от метаданных Git
-        $cleanedDiff = $rawDiff -replace '(?m)^diff --git.*\r?\n' -replace '(?m)^index .*\r?\n' -replace '(?m)^--- a.*\r?\n' -replace '(?m)^\+\+\+ b.*\r?\n' -replace '(?m)^@@ .*\r?\n'
-        
-        # Обрабатываем новые и удаленные файлы
-        $cleanedDiff = $cleanedDiff -replace '(?m)^new file mode \d+\r?\n', "Файл создан`n"
-        $deletedFilesInfo = git diff-tree --no-commit-id --name-status -r "${hash}^!" | Where-Object { $_ -match '^D\s+' }
-        $deletedOutput = ""
-        foreach ($fileInfo in $deletedFilesInfo) {
-            $file = $fileInfo.Substring(2)
-            $isExcluded = $false
-            foreach ($pattern in $excludePatterns) { if ($file -like $pattern.Substring(10).Replace('/', '\')) { $isExcluded = $true; break } }
-            if (-not $isExcluded) { $deletedOutput += "`n**Файл:** `$($file)` (удален)`n" }
-        }
-        
-        # Формируем вывод с именами файлов
+        $cleanedDiff = $rawDiff -replace '(?m)^index .*\r?\n' -replace '(?m)^--- a.*\r?\n' -replace '(?m)^\+\+\+ b.*\r?\n' -replace '(?m)^@@ .*\r?\n' -replace '(?m)^new file mode .*\r?\n'
         $finalDiff = ""
-        $currentFile = ""
         foreach ($line in $cleanedDiff.Split("`n")) {
-            if ($line.StartsWith("diff --git")) {
-                $currentFile = ($line -split ' ')[2].Substring(2)
-                $finalDiff += "`n**Файл:** `$($currentFile)``n"
+            if ($line -match "^diff --git a/(.*) b/(.*)") {
+                # Извлекаем имя файла из строки diff --git
+                $fileName = $matches[2] 
+                $finalDiff += "`n**Файл:** `$($fileName)``n"
             } elseif ($line.Trim() -ne "") {
                 $finalDiff += "$line`n"
             }
         }
-        $diffOutput = $finalDiff.Trim() + $deletedOutput
+        $diffOutput = $finalDiff.Trim()
     }
     
-    if ($isMerge -or ($diffOutput.Trim().Length -gt 0)) {
+    if ($isMerge -or ($diffOutput.Length -gt 0)) {
         $writer.WriteLine($commitInfo)
-        $writer.WriteLine("`n**Изменения в коде:**")
-        if ($isMerge) {
-            $writer.WriteLine("`n`n[Diff для merge-коммита опущен]`n---")
+        if (-not $isMerge) {
+            $writer.WriteLine("`n**Изменения:**`n``````diff`n$($diffOutput)`n``````n---")
         } else {
-            $formattedDiff = "`n``````diff`n$($diffOutput)`n``````n---"
-            $writer.WriteLine($formattedDiff)
+            $writer.WriteLine("`n*(Merge commit - файлы пропущены)*`n---")
         }
     }
 }
 
 $writer.Close()
 $writer.Dispose()
-
-Write-Progress -Activity "Анализ коммитов" -Completed
-Write-Host "Готово! Ультра-оптимизированный отчет сохранен в файл: $absoluteOutputFile"
+Write-Host "Готово! Файл сохранен: $outputFile"
