@@ -63,92 +63,116 @@ $writer.WriteLine("# Полный анализ репозитория: $repoName
 $writer.WriteLine("Период анализа: **$sinceDate** — **$untilDate**")
 $writer.WriteLine("Дата генерации: $(Get-Date -Format 'yyyy-MM-dd HH:mm')`n")
 
-# --- 2. СТРУКТУРА ПРОЕКТА (FILE TREE) ---
-Write-Host "1/3 Генерация структуры файлов..." -ForegroundColor Green
+# --- 1. СТРУКТУРА ---
+Write-Host "1/4 Генерация структуры..." -ForegroundColor Green
 $writer.WriteLine("## 1. Текущая структура проекта")
-$writer.WriteLine("Это список всех актуальных файлов в ветке HEAD (за исключением игнорируемых паттернов). Используй это для понимания архитектуры.`n")
+$writer.WriteLine("Список актуальных файлов в HEAD (для понимания архитектуры).`n")
 $writer.WriteLine("```text")
-
-# Используем git ls-tree, так как он быстрее и учитывает .gitignore, плюс фильтруем нашими паттернами
 $gitTreeArgs = @("ls-files") + $excludePatterns
 $treeOutput = & git @gitTreeArgs | Out-String
-if ($treeOutput) {
-    $writer.WriteLine($treeOutput.Trim())
-} else {
-    $writer.WriteLine("(Файлы не найдены или скрыты фильтрами)")
-}
+if ($treeOutput) { $writer.WriteLine($treeOutput.Trim()) }
 $writer.WriteLine("````n")
 
-# --- 3. СТАТИСТИКА КОММИТОВ (LOG --STAT) ---
-Write-Host "2/3 Сбор статистики коммитов..." -ForegroundColor Green
-$writer.WriteLine("## 2. История изменений и статистика (Summary)")
-$writer.WriteLine("Краткая сводка коммитов: кто, когда и какие файлы менял.`n")
-$writer.WriteLine("```text")
+# --- 1.5. ИСТОРИЯ ПО ФАЙЛАМ ---
+Write-Host "2/4 Генерация истории файлов (Mapping)..." -ForegroundColor Green
+$writer.WriteLine("## 2. История изменений по файлам (File Changelog)")
+$writer.WriteLine("Список файлов и коммитов, в которых они менялись.`n")
 
-# Формируем красивый лог
-$gitLogArgs = @(
+$gitMapArgs = @(
     "log", 
     "--since=$sinceDate", 
     "--until=$untilDate", 
-    "--reverse",
-    "--pretty=format:%h - %an, %ar : %s", 
-    "--stat"
+    "--pretty=format:COMMIT:%h", 
+    "--name-only",
+    "--reverse"
 ) + $excludePatterns
 
-$statOutput = & git @gitLogArgs | Out-String
-if ($statOutput) {
-    $writer.WriteLine($statOutput.Trim())
-} else {
-    $writer.WriteLine("(Статистика недоступна)")
+$mapOutputRaw = & git @gitMapArgs | Out-String
+# Разбиваем строки надежно
+$mapOutputLines = $mapOutputRaw -split "\r?\n"
+
+$fileHistory = @{} 
+$currentCommit = $null
+
+foreach ($line in $mapOutputLines) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    
+    if ($line -match "^COMMIT:(.*)") {
+        $currentCommit = $matches[1]
+    }
+    else {
+        $fileName = $line.Trim()
+        if ($fileName.Length -eq 0) { continue }
+
+        if (-not $fileHistory.ContainsKey($fileName)) {
+            $fileHistory[$fileName] = @()
+        }
+        $fileHistory[$fileName] += $currentCommit
+    }
 }
 
+$writer.WriteLine("| Файл | Кол-во | Коммиты |")
+$writer.WriteLine("|---|---|---|")
+
+$sortedFiles = $fileHistory.Keys | Sort-Object
+
+foreach ($file in $sortedFiles) {
+    $commits = $fileHistory[$file]
+    $uniqueCommits = $commits | Select-Object -Unique
+    $count = $uniqueCommits.Count
+    $commitsStr = $uniqueCommits -join ", "
+    
+    # ИСПРАВЛЕНО: Убран лишний знак ` перед $file
+    $writer.WriteLine("| $file | $count | $commitsStr |")
+}
+$writer.WriteLine("`n")
+
+
+# --- 2. СТАТИСТИКА (LOG STAT) ---
+Write-Host "3/4 Сбор статистики..." -ForegroundColor Green
+$writer.WriteLine("## 3. Общая хронология (Log Stat)")
+$writer.WriteLine("Сводка: кто и когда делал изменения.`n")
+$writer.WriteLine("```text")
+$gitLogArgs = @("log", "--since=$sinceDate", "--until=$untilDate", "--reverse", "--pretty=format:%h - %an, %ar : %s", "--stat") + $excludePatterns
+$statOutput = & git @gitLogArgs | Out-String
+if ($statOutput) { $writer.WriteLine($statOutput.Trim()) }
 $writer.WriteLine("````n")
 
-# --- 4. ДЕТАЛЬНЫЕ ДИФФЫ (ВАШ КОД) ---
-Write-Host "3/3 Сбор детальных диффов..." -ForegroundColor Green
-$writer.WriteLine("## 3. Детальные изменения кода (Diffs)")
-$writer.WriteLine("Ниже приведены конкретные изменения в коде.`n")
+
+# --- 3. ДИФФЫ ---
+Write-Host "4/4 Сбор детальных диффов..." -ForegroundColor Green
+$writer.WriteLine("## 4. Детальные изменения кода (Diffs)")
+$writer.WriteLine("Конкретные изменения в коде.`n")
 
 $commitBodyFormat = if ($firstLineOnly) { "%s" } else { "%s%n%b" }
 $commitFormat = "`n### Коммит: %h | Автор: %an | Дата: %as`n**Сообщение:**`n``````text`n$($commitBodyFormat)`n``````n"
 
 $allCommitHashes = git log --all --since=$sinceDate --until=$untilDate --reverse --pretty=format:"%H"
-
-if (-not $allCommitHashes) {
-    Write-Warning "Коммитов за указанный период не найдено."
-    $writer.Close(); exit
-}
-
+if (-not $allCommitHashes) { $writer.Close(); exit }
 $uniqueCommitHashes = $allCommitHashes | Get-Unique
 $totalCommits = $uniqueCommitHashes.Length
 $processedCount = 0
 
 foreach ($hash in $uniqueCommitHashes) {
     $processedCount++
-    Write-Progress -Activity "Обработка диффов" -Status "Коммит $processedCount из $totalCommits" -PercentComplete (($processedCount / $totalCommits) * 100)
+    Write-Progress -Activity "Обработка диффов" -Status "Коммит $processedCount / $totalCommits" -PercentComplete (($processedCount / $totalCommits) * 100)
 
     $commitInfo = git show -s --pretty=format:$commitFormat $hash | Out-String
-    
     $parentHashes = git log -n 1 --pretty=format:'%P' $hash
     $isMerge = ($parentHashes -and $parentHashes.Contains(" "))
-
     $diffOutput = ""
+
     if (-not $isMerge) {
         $gitShowArgs = @("show", $hash, "--pretty=format:''", "-U$($diffContextLines)")
         if ($ignoreWhitespace) { $gitShowArgs += "--ignore-all-space", "--ignore-blank-lines" }
         if ($wordDiff) { $gitShowArgs += "--word-diff=plain" }
-        # Важно: передаем паттерны исключения, чтобы не тянуть лишнее в дифф
         $gitShowArgs += @("--") + $excludePatterns
         
         $rawDiff = & git @gitShowArgs | Out-String
-
         if ($ignoreComments) {
-            # Немного упрощенный паттерн для JS/TS/Vue комментариев
-            $commentPattern = '(?m)^[+-]\s*(\/\/.*|\/\*.*\*\/)\r?\n'
-            $rawDiff = $rawDiff -replace $commentPattern, ''
+            $rawDiff = $rawDiff -replace '(?m)^[+-]\s*(\/\/.*|\/\*.*\*\/)\r?\n', ''
         }
 
-        # Очистка мусора git diff
         $cleanedDiff = $rawDiff -replace '(?m)^index .*\r?\n' `
                                 -replace '(?m)^--- a.*\r?\n' `
                                 -replace '(?m)^\+\+\+ b.*\r?\n' `
@@ -156,12 +180,10 @@ foreach ($hash in $uniqueCommitHashes) {
                                 -replace '(?m)^new file mode .*\r?\n' `
                                 -replace '(?m)^deleted file mode .*\r?\n'
         
-        # Парсинг имен файлов для удобства чтения LLM
         $finalDiff = ""
         foreach ($line in $cleanedDiff.Split("`n")) {
             if ($line -match "^diff --git a/(.*) b/(.*)") {
                 $fileName = $matches[2] 
-                # Добавляем явный заголовок файла для нейронки
                 $finalDiff += "`n**Файл:** `$($fileName)``n"
             } elseif ($line.Trim() -ne "") {
                 $finalDiff += "$line`n"
@@ -170,7 +192,6 @@ foreach ($hash in $uniqueCommitHashes) {
         $diffOutput = $finalDiff.Trim()
     }
     
-    # Пишем в файл только если есть изменения (или это мердж, если хотите их видеть)
     if ($isMerge -or ($diffOutput.Length -gt 0)) {
         $writer.WriteLine($commitInfo)
         if (-not $isMerge) {
