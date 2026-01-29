@@ -1,6 +1,6 @@
 param(
-    [string]$sinceDate = "2024-01-01",
-    [string]$untilDate = "2025-02-22",
+    [string]$sinceDate = "2025-06-24",
+    [string]$untilDate = "2026-01-30",
     [string]$outputFile = $null, 
     [int]$diffContextLines = 0,
     [switch]$ignoreWhitespace = $true, 
@@ -10,18 +10,31 @@ param(
 )
 
 $excludePatterns = @(
-    ':(exclude)package-lock.json', ':(exclude)yarn.lock', ':(exclude)pnpm-lock.yaml',
+    # Лок-файлы и пакетные менеджеры
+    ':(exclude)package-lock.json', ':(exclude)yarn.lock', ':(exclude)pnpm-lock.yaml', 
+    ':(exclude).npmrc',
+    # Зависимости и сборка
     ':(exclude)node_modules/*', ':(exclude)vendor/*', 
+    ':(exclude)dist/*', ':(exclude)build/*', ':(exclude).output/*', ':(exclude).nuxt/*', 
+    ':(exclude).data/*',
+    # Конфиги и IDE
     ':(exclude).vscode/*', ':(exclude).idea/*', ':(exclude).editorconfig',
-    ':(exclude).gitignore', ':(exclude).gitlab-ci.yml', ':(exclude).npmrc',
-    ':(exclude)dist/*', ':(exclude)build/*', ':(exclude).output/*', ':(exclude).nuxt/*',
-    ':(exclude)*.min.js', ':(exclude)*.min.css', ':(exclude)*.d.ts', 
-    ':(exclude)auto-imports.d.ts', ':(exclude)components.d.ts',
-    ':(exclude)*.stories.ts', ':(exclude).storybook/*',
-    ':(exclude)packages/components/src/components/icons/*', 
-    ':(exclude)*.svg', ':(exclude)*.png', ':(exclude)*.jpg', ':(exclude)*.ico',
-    ':(exclude)*.json', # Убирает lottie, tsconfig и package.json (если package.json нужен, убери это)
+    ':(exclude).gitignore', ':(exclude).gitlab-ci.yml', ':(exclude)Dockerfile',
+    ':(exclude)eslint.config.mjs', ':(exclude)tsconfig.json', ':(exclude)server/tsconfig.json',
+    # Типы и автогенерация
+    ':(exclude)*.d.ts', ':(exclude)auto-imports.d.ts', ':(exclude)components.d.ts',
+    ':(exclude)*.min.js', ':(exclude)*.min.css',
+    # Тесты и сторибук
     ':(exclude)test/*', ':(exclude)*.test.ts', ':(exclude)*.spec.ts',
+    ':(exclude)*.stories.ts', ':(exclude).storybook/*',
+    # Ресурсы и статика
+    ':(exclude)*.json', 
+    ':(exclude)*.svg', ':(exclude)*.png', ':(exclude)*.jpg', ':(exclude)*.jpeg', ':(exclude)*.ico',
+    ':(exclude)*.html', ':(exclude)app/spa-loading-template.html',
+    ':(exclude)public/*',
+    # Специфичные пути проекта
+    ':(exclude)packages/components/src/components/icons/*', 
+    ':(exclude)app/components/icons/*', 
     ':(exclude)packages/playground/*'
 )
 
@@ -44,26 +57,68 @@ if (-not $outputFile) {
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $absoluteOutputFile = Join-Path -Path (Get-Location) -ChildPath $outputFile
 $writer = New-Object System.IO.StreamWriter($absoluteOutputFile, $false, [System.Text.Encoding]::UTF8)
-$writer.WriteLine("# Ретроспективное код-ревью (оптимизировано для LLM)`n")
-$writer.WriteLine("Период анализа: с $($sinceDate) по $($untilDate)`n")
 
-Write-Host "Начинаю сбор информации..."
+# --- 1. ЗАГОЛОВОК ---
+$writer.WriteLine("# Полный анализ репозитория: $repoName")
+$writer.WriteLine("Период анализа: **$sinceDate** — **$untilDate**")
+$writer.WriteLine("Дата генерации: $(Get-Date -Format 'yyyy-MM-dd HH:mm')`n")
+
+# --- 2. СТРУКТУРА ПРОЕКТА (FILE TREE) ---
+Write-Host "1/3 Генерация структуры файлов..." -ForegroundColor Green
+$writer.WriteLine("## 1. Текущая структура проекта")
+$writer.WriteLine("Это список всех актуальных файлов в ветке HEAD (за исключением игнорируемых паттернов). Используй это для понимания архитектуры.`n")
+$writer.WriteLine("```text")
+
+# Используем git ls-tree, так как он быстрее и учитывает .gitignore, плюс фильтруем нашими паттернами
+$gitTreeArgs = @("ls-files") + $excludePatterns
+$treeOutput = & git @gitTreeArgs
+$writer.WriteLine($treeOutput)
+$writer.WriteLine("````n")
+
+
+# --- 3. СТАТИСТИКА КОММИТОВ (LOG --STAT) ---
+Write-Host "2/3 Сбор статистики коммитов..." -ForegroundColor Green
+$writer.WriteLine("## 2. История изменений и статистика (Summary)")
+$writer.WriteLine("Краткая сводка коммитов: кто, когда и какие файлы менял.`n")
+$writer.WriteLine("```text")
+
+# Формируем красивый лог
+$gitLogArgs = @(
+    "log", 
+    "--since=$sinceDate", 
+    "--until=$untilDate", 
+    "--reverse",
+    "--pretty=format:%h - %an, %ar : %s", 
+    "--stat"
+) + $excludePatterns
+
+$statOutput = & git @gitLogArgs
+$writer.WriteLine($statOutput)
+$writer.WriteLine("````n")
+
+
+# --- 4. ДЕТАЛЬНЫЕ ДИФФЫ (ВАШ КОД) ---
+Write-Host "3/3 Сбор детальных диффов..." -ForegroundColor Green
+$writer.WriteLine("## 3. Детальные изменения кода (Diffs)")
+$writer.WriteLine("Ниже приведены конкретные изменения в коде.`n")
 
 $commitBodyFormat = if ($firstLineOnly) { "%s" } else { "%s%n%b" }
-$commitFormat = "`n## Коммит: %h | Автор: %an | Дата: %as`n**Сообщение:**`n``````text`n$($commitBodyFormat)`n``````n"
+$commitFormat = "`n### Коммит: %h | Автор: %an | Дата: %as`n**Сообщение:**`n``````text`n$($commitBodyFormat)`n``````n"
 
 $allCommitHashes = git log --all --since=$sinceDate --until=$untilDate --reverse --pretty=format:"%H"
+
 if (-not $allCommitHashes) {
     Write-Warning "Коммитов за указанный период не найдено."
     $writer.Close(); exit
 }
+
 $uniqueCommitHashes = $allCommitHashes | Get-Unique
 $totalCommits = $uniqueCommitHashes.Length
 $processedCount = 0
 
 foreach ($hash in $uniqueCommitHashes) {
     $processedCount++
-    Write-Progress -Activity "Анализ коммитов" -Status "Обработка $processedCount / $totalCommits" -PercentComplete (($processedCount / $totalCommits) * 100)
+    Write-Progress -Activity "Обработка диффов" -Status "Коммит $processedCount из $totalCommits" -PercentComplete (($processedCount / $totalCommits) * 100)
 
     $commitInfo = git show -s --pretty=format:$commitFormat $hash | Out-String
     
@@ -75,21 +130,31 @@ foreach ($hash in $uniqueCommitHashes) {
         $gitShowArgs = @("show", $hash, "--pretty=format:''", "-U$($diffContextLines)")
         if ($ignoreWhitespace) { $gitShowArgs += "--ignore-all-space", "--ignore-blank-lines" }
         if ($wordDiff) { $gitShowArgs += "--word-diff=plain" }
+        # Важно: передаем паттерны исключения, чтобы не тянуть лишнее в дифф
         $gitShowArgs += @("--") + $excludePatterns
         
         $rawDiff = & git @gitShowArgs | Out-String
 
         if ($ignoreComments) {
-            $commentPattern = '(?m)^[+-]\s*(\/\/.*|\/\*.*\*\/|\/\*.*|\*\s.*|.*\*\/)\r?\n'
+            # Немного упрощенный паттерн для JS/TS/Vue комментариев
+            $commentPattern = '(?m)^[+-]\s*(\/\/.*|\/\*.*\*\/)\r?\n'
             $rawDiff = $rawDiff -replace $commentPattern, ''
         }
 
-        $cleanedDiff = $rawDiff -replace '(?m)^index .*\r?\n' -replace '(?m)^--- a.*\r?\n' -replace '(?m)^\+\+\+ b.*\r?\n' -replace '(?m)^@@ .*\r?\n' -replace '(?m)^new file mode .*\r?\n'
+        # Очистка мусора git diff
+        $cleanedDiff = $rawDiff -replace '(?m)^index .*\r?\n' `
+                                -replace '(?m)^--- a.*\r?\n' `
+                                -replace '(?m)^\+\+\+ b.*\r?\n' `
+                                -replace '(?m)^@@ .*\r?\n' `
+                                -replace '(?m)^new file mode .*\r?\n' `
+                                -replace '(?m)^deleted file mode .*\r?\n'
+        
+        # Парсинг имен файлов для удобства чтения LLM
         $finalDiff = ""
         foreach ($line in $cleanedDiff.Split("`n")) {
             if ($line -match "^diff --git a/(.*) b/(.*)") {
-                # Извлекаем имя файла из строки diff --git
                 $fileName = $matches[2] 
+                # Добавляем явный заголовок файла для нейронки
                 $finalDiff += "`n**Файл:** `$($fileName)``n"
             } elseif ($line.Trim() -ne "") {
                 $finalDiff += "$line`n"
@@ -98,6 +163,7 @@ foreach ($hash in $uniqueCommitHashes) {
         $diffOutput = $finalDiff.Trim()
     }
     
+    # Пишем в файл только если есть изменения (или это мердж, если хотите их видеть)
     if ($isMerge -or ($diffOutput.Length -gt 0)) {
         $writer.WriteLine($commitInfo)
         if (-not $isMerge) {
@@ -110,4 +176,4 @@ foreach ($hash in $uniqueCommitHashes) {
 
 $writer.Close()
 $writer.Dispose()
-Write-Host "Готово! Файл сохранен: $outputFile"
+Write-Host "`nГотово! Полный отчет сохранен в: $outputFile" -ForegroundColor Cyan
