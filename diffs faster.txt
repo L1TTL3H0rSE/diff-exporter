@@ -71,10 +71,13 @@ $writer.WriteLine("```text")
 
 # Используем git ls-tree, так как он быстрее и учитывает .gitignore, плюс фильтруем нашими паттернами
 $gitTreeArgs = @("ls-files") + $excludePatterns
-$treeOutput = & git @gitTreeArgs
-$writer.WriteLine($treeOutput)
+$treeOutput = & git @gitTreeArgs | Out-String
+if ($treeOutput) {
+    $writer.WriteLine($treeOutput.Trim())
+} else {
+    $writer.WriteLine("(Файлы не найдены или скрыты фильтрами)")
+}
 $writer.WriteLine("````n")
-
 
 # --- 3. СТАТИСТИКА КОММИТОВ (LOG --STAT) ---
 Write-Host "2/3 Сбор статистики коммитов..." -ForegroundColor Green
@@ -92,10 +95,14 @@ $gitLogArgs = @(
     "--stat"
 ) + $excludePatterns
 
-$statOutput = & git @gitLogArgs
-$writer.WriteLine($statOutput)
-$writer.WriteLine("````n")
+$statOutput = & git @gitLogArgs | Out-String
+if ($statOutput) {
+    $writer.WriteLine($statOutput.Trim())
+} else {
+    $writer.WriteLine("(Статистика недоступна)")
+}
 
+$writer.WriteLine("````n")
 
 # --- 4. ДЕТАЛЬНЫЕ ДИФФЫ (ВАШ КОД) ---
 Write-Host "3/3 Сбор детальных диффов..." -ForegroundColor Green
